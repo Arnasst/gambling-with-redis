@@ -1,10 +1,12 @@
-from time import sleep
-from redis import Redis, WatchError
-from threading import Thread
-from random import sample
 from collections import Counter
+from random import sample
+from threading import Thread
+from time import sleep
+
+from redis import Redis, WatchError
 
 UPCOMING_TICKET_ID = 'upcoming_ticket_id'
+NAMES = 'names'
 
 VALID_NUMBERS = list(range(1, 41))
 
@@ -30,39 +32,45 @@ def get_winner_tickets(connection: Redis):
         try:
             results = pipe.execute()
             winner_ticket_ids = [int(ticket_id) for sublist in results for ticket_id in sublist]
-            print(f'Matching numbers of each winning ticket: {dict(Counter(winner_ticket_ids))}')
+            matching_numbers = dict(Counter(winner_ticket_ids))
+
+            print(f'Matching numbers of each winning ticket:')
+            names = connection.smembers(NAMES)
+            for ticket_id, count in matching_numbers.items():
+                for name in names:
+                    if connection.sismember(name, ticket_id):
+                        winner_name = name.decode('utf-8')
+                        break
+                print(f"Ticket #{ticket_id} ({winner_name}) - {count} matching numbers")
         except WatchError:
             print('An error occurred while getting winner tickets. Try again.')
 
-def insert_ticket(ticket_id: int, ticket_numbers: list, connection: Redis):
-    with connection.pipeline() as pipe:
-        pipe.multi()
-        for number in ticket_numbers:
-            pipe.rpush(number, ticket_id)
-        pipe.execute()
+def insert_ticket(ticket_id: int, ticket_numbers: list, name: str, connection: Redis):
+    for number in ticket_numbers:
+        connection.rpush(number, ticket_id)
+    connection.sadd(name, ticket_id)
 
-def draw_ticket_naive(connection: Redis):
+def draw_ticket_naive(connection: Redis, name: str):
     ticket_numbers = sample(VALID_NUMBERS, 5)
     ticket_numbers.sort()
 
-    connection.watch(UPCOMING_TICKET_ID)
     ticket_id = int(connection.get(UPCOMING_TICKET_ID))
     connection.incr(UPCOMING_TICKET_ID)
-    insert_ticket(ticket_id, ticket_numbers, connection)
-    connection.unwatch()
+    insert_ticket(ticket_id, ticket_numbers, name, connection)
     print(f'Ticket #{ticket_id} numbers: {ticket_numbers}')
 
-def draw_ticket_slow(connection: Redis):
+def draw_ticket_slow(connection: Redis, name: str):
     with connection.pipeline() as pipe:
         ticket_numbers = sample(VALID_NUMBERS, 5)
         ticket_numbers.sort()
 
         pipe.watch(UPCOMING_TICKET_ID)
+        pipe.watch(name)
         pipe.multi()
         ticket_id = int(connection.get(UPCOMING_TICKET_ID))
         sleep(1)
         pipe.incr(UPCOMING_TICKET_ID)
-        insert_ticket(ticket_id, ticket_numbers, connection)
+        insert_ticket(ticket_id, ticket_numbers, name, pipe)
 
         try:
             pipe.execute()
@@ -70,11 +78,11 @@ def draw_ticket_slow(connection: Redis):
         except WatchError:
             print('Another ticket is being updated at the moment. Try drawing again.')
 
-def draw_three_tickets(connection: Redis):
+def draw_three_tickets(connection: Redis, name):
     draw_threads = [
-        Thread(target=draw_ticket_naive, args=(connection,)),
-        Thread(target=draw_ticket_slow, args=(connection,)),
-        Thread(target=draw_ticket_naive, args=(connection,)),
+        Thread(target=draw_ticket_naive, args=(connection, name)),
+        Thread(target=draw_ticket_slow, args=(connection, name)),
+        Thread(target=draw_ticket_naive, args=(connection, name)),
     ]
 
     # Start draws
@@ -105,13 +113,13 @@ def print_help():
     ''')
 
 processes = {
-    'slow': lambda connection: draw_ticket_slow(connection),
-    'naive': lambda connection: draw_ticket_naive(connection),
-    'three': lambda connection: draw_three_tickets(connection),
-    'next': lambda connection: upcoming_ticket_id(connection),
-    'winners': lambda connection: get_winner_tickets(connection),
-    'help': lambda _: print_help(),
-    'exit': lambda _: exit()
+    'slow': lambda connection, name: draw_ticket_slow(connection, name),
+    'naive': lambda connection, name: draw_ticket_naive(connection, name),
+    'three': lambda connection, name: draw_three_tickets(connection, name),
+    'next': lambda connection, _: upcoming_ticket_id(connection),
+    'winners': lambda connection, _: get_winner_tickets(connection),
+    'help': lambda _, __: print_help(),
+    'exit': lambda _, __: exit()
 }
 
 def main():
@@ -122,12 +130,15 @@ def main():
         connection.set(UPCOMING_TICKET_ID, 1)
 
     print('\nWelcome to the lottery!')
+
+    name = input('Enter your name: ')
+    connection.sadd(NAMES, name)
     print_help()
 
     while True:
         try:
             command = input('Enter a command: ')
-            processes[command](connection)
+            processes[command](connection, name)
         except KeyError:
             print('Invalid command. Enter "help" to see available commands.')
 
