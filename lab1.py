@@ -36,10 +36,10 @@ def get_winner_tickets(connection: Redis):
 
 def insert_ticket(ticket_id: int, ticket_numbers: list, connection: Redis):
     with connection.pipeline() as pipe:
-        for number in ticket_numbers:
-            pipe.watch(number)
+        pipe.multi()
         for number in ticket_numbers:
             pipe.rpush(number, ticket_id)
+        pipe.execute()
 
 def draw_ticket_naive(connection: Redis):
     ticket_numbers = sample(VALID_NUMBERS, 5)
@@ -69,7 +69,7 @@ def draw_ticket_slow(connection: Redis):
             print(f'Ticket #{ticket_id} numbers: {ticket_numbers}')
         except WatchError:
             print('Another ticket is being updated at the moment. Try drawing again.')
-        
+
 def draw_three_tickets(connection: Redis):
     draw_threads = [
         Thread(target=draw_ticket_naive, args=(connection,)),
@@ -88,11 +88,11 @@ def draw_three_tickets(connection: Redis):
 def upcoming_ticket_id(connection: Redis):
     upcoming_ticket_id = int(connection.get(UPCOMING_TICKET_ID))
     print(f'Upcoming ticket #{upcoming_ticket_id}')
-        
+
 def print_help():
     print('''
     ____________________________________________________________
-          
+
     slow        - Draw a ticket using a slow method
     naive       - Draw a ticket using a naive method
     three       - Draw three tickets in three threads
@@ -101,7 +101,7 @@ def print_help():
     help        - Show this help
     exit        - Exit the program
     ____________________________________________________________
-          
+
     ''')
 
 processes = {
